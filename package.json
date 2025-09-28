@@ -1,5 +1,9 @@
-{
-  "name": "sunshine-wa-flow-vercel",
-  "version": "1.0.0",
-  "type": "module"
-}
+{{
+
+  "name": "sunshine-wa-flow-vercel",  "name": "sunshine-wa-flow-vercel",
+
+  "version": "1.0.0",  "version": "1.0.0",
+
+  "type": "module"  "type": "module"
+
+}}
