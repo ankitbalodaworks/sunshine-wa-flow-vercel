@@ -1,7 +1,7 @@
 import { decryptFlowRequestBody, encryptFlowResponseBody } from '../lib/waCrypto.js';
 import { persistServiceSubmission } from '../lib/persist.js';
 
-export const config = { runtime: 'nodejs20.x' };
+export const config = { runtime: 'nodejs' };
 
 export default async function handler(req, res) {
   try {
