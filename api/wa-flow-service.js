@@ -1,7 +1,7 @@
 import { decryptFlowRequestBody, encryptFlowResponseBody } from '../lib/waCrypto.js';
 import { persistServiceSubmission } from '../lib/persist.js';
 
-export const config = { runtime: 'nodejs20.x' };
+export const config = { runtime: 'nodejs' };
 
 // Robust raw-body reader
 async function readRawBody(req) {
