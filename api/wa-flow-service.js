@@ -1,19 +1,13 @@
 import { decryptFlowRequestBody, encryptFlowResponseBody } from '../lib/waCrypto.js';
 import { persistServiceSubmission } from '../lib/persist.js';
 
-// Ensure Node 20 runtime on Vercel
 export const config = { runtime: 'nodejs20.x' };
 
-// robust raw-body reader (handles Buffer/stream/JSON)
+// Robust raw-body reader
 async function readRawBody(req) {
-  // if Vercel already gave us a string
   if (typeof req.body === 'string') return req.body;
-  // if Vercel gave us a Buffer
-  if (Buffer.isBuffer(req.body)) return req.body.toString('utf8');
-  // if they parsed JSON already
+  if (Buffer.isBuffer(req.body))     return req.body.toString('utf8');
   if (req.body && typeof req.body === 'object') return JSON.stringify(req.body);
-
-  // otherwise read the stream manually (octet-stream etc.)
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks).toString('utf8');
@@ -22,7 +16,7 @@ async function readRawBody(req) {
 export default async function handler(req, res) {
   try {
     if (req.method === 'GET') {
-      return res.status(200).json({ ok: true, now: new Date().toISOString() });
+      return res.status(200).json({ ok: true, now: new Date().toISOString(), v: 'def-2' });
     }
     if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
@@ -33,11 +27,37 @@ export default async function handler(req, res) {
     }
 
     const rawBody = await readRawBody(req);
-    console.log('CT:', req.headers['content-type'], 'LEN:', rawBody?.length || 0);
+    const ct = (req.headers['content-type'] || req.headers['Content-Type'] || '').toString();
+    const preview = rawBody ? rawBody.slice(0, 120).replace(/\s+/g, ' ') : '';
+    console.log('CT:', ct, '| LEN:', rawBody?.length || 0, '| PREVIEW:', preview);
 
-    // 🔑 Decrypt WhatsApp Flow envelope → clear JSON + AES session key
-    const { clear, aesKey } = decryptFlowRequestBody(rawBody, PRIVATE_KEY);
-    console.log('DECRYPTED CLEAR:', JSON.stringify(clear));
+    // --- CRITICAL: if body is empty or 1-2 chars junk, treat as health probe without encryption ---
+    const trimmed = (rawBody || '').trim();
+    if (!trimmed || trimmed.length < 2) {
+      const ok = { data: { status: 'active' } };
+      console.warn('Empty/short body -> sending plain health OK');
+      return res.status(200).json(ok);
+    }
+
+    // Try decrypt (normal flow health/data_exchange path)
+    let clear, aesKey;
+    try {
+      ({ clear, aesKey } = decryptFlowRequestBody(rawBody, PRIVATE_KEY));
+    } catch (e) {
+      // If decrypt fails, log and try a plain JSON fallback for health checks
+      console.error('decryptFlowRequestBody failed:', e?.message || e);
+      try {
+        const maybe = JSON.parse(trimmed);
+        clear = maybe;
+        aesKey = null;
+        console.warn('Proceeding with PLAIN JSON clear (no AES)');
+      } catch {
+        // Still not JSON → bail with Bad Request (but 200 plain health for Flow HC might be acceptable)
+        return res.status(400).send('Bad Request: body not decryptable');
+      }
+    }
+
+    console.log('DECRYPTED/PLAIN CLEAR keys:', Object.keys(clear || {}));
 
     const op = clear?.payload?.op ?? clear?.data?.op ?? clear?.op ?? null;
     const isHealth =
@@ -54,11 +74,11 @@ export default async function handler(req, res) {
         res.setHeader('Content-Type', 'application/octet-stream');
         return res.status(200).send(b64);
       }
-      // Fallback (rare preview without encryption)
+      // If we don't have AES (plain probe), reply JSON
       return res.status(200).json(ok);
     }
 
-    // ---- Extract fields in common shapes
+    // ------- extract fields (unchanged) -------
     function arrayToObject(arr = []) {
       const out = {};
       for (const e of arr) {
@@ -88,10 +108,11 @@ export default async function handler(req, res) {
       }
       return {};
     }
+
     const fields = extractFormFields(clear);
     console.log('FIELDS_KEYS:', Object.keys(fields));
 
-    // ---- (Optional) forward to your Google Apps Script Web App to append to Sheet
+    // Optional forward to Google Sheets Web App
     if (process.env.GAS_WEBAPP_URL && Object.keys(fields).length) {
       try {
         await fetch(process.env.GAS_WEBAPP_URL, {
@@ -104,19 +125,17 @@ export default async function handler(req, res) {
       }
     }
 
-    // Persist/log locally
     if (Object.keys(fields).length) {
       persistServiceSubmission({ type: 'service_form', ...fields, received_at: new Date().toISOString() });
     }
 
-    // Tell WhatsApp to advance to success screen
-    const responseJson = { version: '3.0', screen: 'SERVICE_SUCCESS', data: { ok: true } };
+    const reply = { version: '3.0', screen: 'SERVICE_SUCCESS', data: { ok: true } };
     if (aesKey) {
-      const b64 = encryptFlowResponseBody(responseJson, aesKey);
+      const b64 = encryptFlowResponseBody(reply, aesKey);
       res.setHeader('Content-Type', 'application/octet-stream');
       return res.status(200).send(b64);
     }
-    return res.status(200).json(responseJson);
+    return res.status(200).json(reply);
 
   } catch (err) {
     console.error('wa-flow-service error:', err?.stack || String(err));
