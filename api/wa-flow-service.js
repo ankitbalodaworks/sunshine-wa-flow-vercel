@@ -1,8 +1,24 @@
 import { decryptFlowRequestBody, encryptFlowResponseBody } from '../lib/waCrypto.js';
 import { persistServiceSubmission } from '../lib/persist.js';
 
-// Tell Vercel to use Node 20 runtime
+// Ensure Node 20 runtime on Vercel
 export const config = { runtime: 'nodejs20.x' };
+
+// robust raw-body reader (handles Buffer/stream/JSON)
+async function readRawBody(req) {
+  // if Vercel already gave us a string
+  if (typeof req.body === 'string') return req.body;
+  // if Vercel gave us a Buffer
+  if (Buffer.isBuffer(req.body)) return req.body.toString('utf8');
+  // if they parsed JSON already
+  if (req.body && typeof req.body === 'object') return JSON.stringify(req.body);
+
+  // otherwise read the stream manually (octet-stream etc.)
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method === 'GET') {
@@ -16,11 +32,10 @@ export default async function handler(req, res) {
       return res.status(500).send('Server not configured');
     }
 
-    // Vercel can parse JSON; we need raw string for decrypt helper
-    const rawBody = typeof req.body === 'string'
-      ? req.body
-      : (req.body ? JSON.stringify(req.body) : req.rawBody);
+    const rawBody = await readRawBody(req);
+    console.log('CT:', req.headers['content-type'], 'LEN:', rawBody?.length || 0);
 
+    // 🔑 Decrypt WhatsApp Flow envelope → clear JSON + AES session key
     const { clear, aesKey } = decryptFlowRequestBody(rawBody, PRIVATE_KEY);
     console.log('DECRYPTED CLEAR:', JSON.stringify(clear));
 
@@ -39,11 +54,12 @@ export default async function handler(req, res) {
         res.setHeader('Content-Type', 'application/octet-stream');
         return res.status(200).send(b64);
       }
+      // Fallback (rare preview without encryption)
       return res.status(200).json(ok);
     }
 
     // ---- Extract fields in common shapes
-    function arrayToObject(arr=[]) {
+    function arrayToObject(arr = []) {
       const out = {};
       for (const e of arr) {
         const name = e?.name || e?.key || e?.id;
@@ -103,7 +119,7 @@ export default async function handler(req, res) {
     return res.status(200).json(responseJson);
 
   } catch (err) {
-    console.error('wa-flow-service error:', err);
+    console.error('wa-flow-service error:', err?.stack || String(err));
     return res.status(500).send('Internal Server Error');
   }
 }
