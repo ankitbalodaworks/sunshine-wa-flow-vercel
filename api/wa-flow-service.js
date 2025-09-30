@@ -1,3 +1,13 @@
+// Only one config export allowed
+export default async function handler(req, res) {
+  res.status(200).json({
+    ok: true,
+    route: '/api/wa-flow-service',
+    method: req.method,
+    version: 'ping-01',
+    now: new Date().toISOString()
+  });
+}
 
 // api/wa-flow-service.js
 import crypto from 'node:crypto';
