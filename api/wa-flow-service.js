@@ -16,6 +16,26 @@ async function _readRawBody(req) {
 function _jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
 
 // Decrypt Meta Flows 3-field envelope -> { clear:Object, aesKey:Buffer }
+
+// api/wa-flow-service.js
+import crypto from 'node:crypto';
+
+export const config = { runtime: 'nodejs' };
+const VERSION = 'v-inline-3field-OK-03';
+
+// ---------- helpers (names prefixed with _) ----------
+async function _readRawBody(req) {
+  if (typeof req.body === 'string') return req.body;
+  if (Buffer.isBuffer(req.body)) return req.body.toString('utf8');
+  if (req.body && typeof req.body === 'object') return JSON.stringify(req.body);
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function _jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
+
+// Decrypt Meta Flows 3-field envelope -> { clear:Object, aesKey:Buffer }
 function _decryptMetaEnvelope3(obj, privatePem) {
   const efd = obj?.encrypted_flow_data;
   const eak = obj?.encrypted_aes_key;
@@ -59,7 +79,7 @@ function _encryptResponseB64(obj, aesKey) {
 }
 
 // ---------- handler ----------
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   try {
     if (req.method === 'GET') {
       return res.status(200).json({ ok: true, version: VERSION, now: new Date().toISOString() });
@@ -143,25 +163,6 @@ module.exports = async function handler(req, res) {
     return res.status(500).send('Internal Server Error');
   }
 }
-  for await (const chunk of req) chunks.push(chunk);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-export default async function handler(req, res) {
-  try {
-    if (req.method === 'GET') {
-      return res.status(200).json({ ok: true, now: new Date().toISOString(), v: 'def-2' });
-    }
-    if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-
-    const PRIVATE_KEY = (process.env.WA_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-    if (!PRIVATE_KEY.includes('BEGIN PRIVATE KEY')) {
-      console.error('WA_PRIVATE_KEY missing/malformed');
-      return res.status(500).send('Server not configured');
-    }
-
-    const rawBody = await readRawBody(req);
-    const ct = (req.headers['content-type'] || req.headers['Content-Type'] || '').toString();
     const preview = rawBody ? rawBody.slice(0, 120).replace(/\s+/g, ' ') : '';
     console.log('CT:', ct, '| LEN:', rawBody?.length || 0, '| PREVIEW:', preview);
 
