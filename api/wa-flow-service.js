@@ -1,19 +1,8 @@
-// Only one config export allowed
-export default async function handler(req, res) {
-  res.status(200).json({
-    ok: true,
-    route: '/api/wa-flow-service',
-    method: req.method,
-    version: 'ping-01',
-    now: new Date().toISOString()
-  });
-}
 
-// api/wa-flow-service.js
 import crypto from 'node:crypto';
 
-export const config = { runtime: 'nodejs' }; // valid: "nodejs" | "edge"
-const VERSION = 'v-inline-3field-OK-02';
+export const config = { runtime: 'nodejs' };
+const VERSION = 'v-inline-3field-OK-04';
 
 // ---------- helpers ----------
 async function _readRawBody(req) {
@@ -23,26 +12,7 @@ async function _readRawBody(req) {
   const chunks = [];
   for await (const c of req) chunks.push(c);
   return Buffer.concat(chunks).toString('utf8');
-function _jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
-
-// Decrypt Meta Flows 3-field envelope -> { clear:Object, aesKey:Buffer }
-
-// api/wa-flow-service.js
-import crypto from 'node:crypto';
-
-export const config = { runtime: 'nodejs' };
-const VERSION = 'v-inline-3field-OK-03';
-
-// ---------- helpers (names prefixed with _) ----------
-async function _readRawBody(req) {
-  if (typeof req.body === 'string') return req.body;
-  if (Buffer.isBuffer(req.body)) return req.body.toString('utf8');
-  if (req.body && typeof req.body === 'object') return JSON.stringify(req.body);
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  return Buffer.concat(chunks).toString('utf8');
 }
-
 function _jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
 
 // Decrypt Meta Flows 3-field envelope -> { clear:Object, aesKey:Buffer }
@@ -105,29 +75,23 @@ export default async function handler(req, res) {
     const raw = await _readRawBody(req);
     const ctHdr = (req.headers['content-type'] || '').toString();
     console.log('CT:', ctHdr, '| LEN:', raw?.length || 0, '| PREVIEW:', (raw || '').slice(0, 120).replace(/\s+/g,' '));
-
     if (!raw || raw.trim().length < 2) {
-      console.warn('Empty body -> plain health OK');
+      // allow empty probe
       return res.status(200).json({ data: { status: 'active' }, version: VERSION });
     }
 
-    // Parse incoming as JSON (or base64(JSON))
+    // Parse JSON or base64(JSON)
     const parsed = _jsonTry(raw) || _jsonTry(Buffer.from(raw, 'base64').toString('utf8'));
-    if (!parsed) {
-      console.error('Incoming not JSON nor base64(JSON)');
-      return res.status(400).send('Bad Request');
-    }
+    if (!parsed) return res.status(400).send('Bad Request');
 
     // Decrypt 3-field envelope
-    let clear, aesKey;
-    if (parsed.encrypted_flow_data && parsed.encrypted_aes_key && parsed.initial_vector) {
-      console.log('Detected 3-field envelope: attempting decrypt');
-      ({ clear, aesKey } = _decryptMetaEnvelope3(parsed, PRIVATE_KEY));
-    } else {
-      console.warn('No 3-field envelope present -> plain health OK');
+    if (!(parsed.encrypted_flow_data && parsed.encrypted_aes_key && parsed.initial_vector)) {
+      // If no envelope present, treat as plain health ping
       return res.status(200).json({ data: { status: 'active' }, version: VERSION });
     }
 
+    console.log('Detected 3-field envelope: attempting decrypt');
+    const { clear, aesKey } = _decryptMetaEnvelope3(parsed, PRIVATE_KEY);
     console.log('DECRYPTED CLEAR KEYS:', Object.keys(clear || {}));
 
     // Health check?
@@ -146,23 +110,7 @@ export default async function handler(req, res) {
       return res.status(200).send(b64);
     }
 
-    // Submission path (extract fields if present)
-    let fields = {};
-    if (Array.isArray(clear?.data?.fields)) {
-      for (const f of clear.data.fields) {
-        const name = f?.name;
-        const value = (f?.value !== undefined) ? f.value : (f?.selected_option?.id ?? f);
-        if (name) fields[name] = value;
-      }
-    } else if (clear?.data?.service_form) {
-      fields = clear.data.service_form;
-    } else if (clear?.fields) {
-      fields = clear.fields;
-    } else if (clear?.data && typeof clear.data === 'object') {
-      fields = clear.data;
-    }
-    console.log('FIELDS_KEYS:', Object.keys(fields));
-
+    // Normal submission → (extract if needed), then success
     const reply = { version: '3.0', screen: 'SERVICE_SUCCESS', data: { ok: true } };
     const b64 = _encryptResponseB64(reply, aesKey);
     res.setHeader('Content-Type', 'application/octet-stream');
