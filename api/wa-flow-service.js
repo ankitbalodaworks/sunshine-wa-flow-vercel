@@ -17,30 +17,89 @@ function _jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
 
 // Decrypt Meta Flows 3-field envelope -> { clear:Object, aesKey:Buffer }
 function _decryptMetaEnvelope3(obj, privatePem) {
-  const efd = obj?.encrypted_flow_data;
-  const eak = obj?.encrypted_aes_key;
-  const ivB64 = obj?.initial_vector;
-  if (!(efd && eak && ivB64)) return null;
+  // Accept common alias keys too
+  const efd = obj?.encrypted_flow_data || obj?.encryptedData || obj?.encrypted_flowData;
+  const eak = obj?.encrypted_aes_key   || obj?.encryptedAesKey;
+  const ivB64 = obj?.initial_vector    || obj?.initialization_vector || obj?.iv;
 
-  const iv = Buffer.from(ivB64, 'base64');
-  const data = Buffer.from(efd, 'base64');
-  if (iv.length !== 12 || data.length <= 16) return null;
+  // Log raw field values and types for diagnostics
+  console.log('[ENVELOPE FIELDS]', {
+    encrypted_flow_data: efd,
+    encrypted_aes_key: eak,
+    initial_vector: ivB64,
+    typeof_encrypted_flow_data: typeof efd,
+    typeof_encrypted_aes_key: typeof eak,
+    typeof_initial_vector: typeof ivB64,
+    length_encrypted_flow_data: efd?.length,
+    length_encrypted_aes_key: eak?.length,
+    length_initial_vector: ivB64?.length
+  });
 
+  if (!(efd && eak && ivB64)) {
+    console.error('Envelope missing required fields', {
+      encrypted_flow_data: efd,
+      encrypted_aes_key: eak,
+      initial_vector: ivB64
+    });
+    return null;
+  }
+
+  let iv, data, aesKeyB;
+  try {
+    iv = Buffer.from(ivB64, 'base64');
+  } catch (e) {
+    console.error('Base64 decode error for iv:', e.message, 'ivB64:', ivB64);
+    return null;
+  }
+  try {
+    data = Buffer.from(efd, 'base64');
+  } catch (e) {
+    console.error('Base64 decode error for encrypted_flow_data:', e.message, 'efd:', efd);
+    return null;
+  }
+  try {
+    aesKeyB = Buffer.from(eak, 'base64');
+  } catch (e) {
+    console.error('Base64 decode error for encrypted_aes_key:', e.message, 'eak:', eak);
+    return null;
+  }
+
+  // Log exact sizes to see what we get from Meta
+  console.log('ENV SIZES → iv:', iv.length, ' data:', data.length, ' aesKeyB:', aesKeyB.length);
+
+  // Be lenient: IV is typically 12, but allow 12–16; data must be > 16 (to have a 16-byte GCM tag)
+  if (!(iv.length >= 12 && data.length > 16)) {
+    console.error('Envelope size sanity failed');
+    return null;
+  }
+
+  // Split data into ciphertext + 16-byte GCM tag (tag is last 16 bytes by convention)
   const tag = data.subarray(data.length - 16);
   const ct  = data.subarray(0, data.length - 16);
 
-  const aesKey = crypto.privateDecrypt(
-    { key: privatePem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
-    Buffer.from(eak, 'base64')
-  ); // 16 or 32 bytes
+  let aesKey;
+  try {
+    aesKey = crypto.privateDecrypt(
+      { key: privatePem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+      Buffer.from(eak, 'base64')
+    ); // 16 or 32 bytes
+  } catch (e) {
+    console.error('RSA unwrap failed (key mismatch?):', e.message);
+    return null;
+  }
 
   const algo = aesKey.length === 16 ? 'aes-128-gcm' : 'aes-256-gcm';
-  const dec  = crypto.createDecipheriv(algo, aesKey, iv);
-  dec.setAuthTag(tag);
-  const plain = Buffer.concat([dec.update(ct), dec.final()]);
-  const clear = _jsonTry(plain.toString('utf8'));
-  if (!clear) throw new Error('Decrypted but not JSON');
-  return { clear, aesKey };
+  try {
+    const dec  = crypto.createDecipheriv(algo, aesKey, iv);
+    dec.setAuthTag(tag);
+    const plain = Buffer.concat([dec.update(ct), dec.final()]);
+    const txt = plain.toString('utf8');
+    const clear = JSON.parse(txt);
+    return { clear, aesKey };
+  } catch (e) {
+    console.error('AES-GCM decrypt failed:', e.message);
+    return null;
+  }
 }
 
 // Encrypt response JSON with same AES key -> base64(JSON{iv,ciphertext,tag})
@@ -84,19 +143,21 @@ export default async function handler(req, res) {
     const parsed = _jsonTry(raw) || _jsonTry(Buffer.from(raw, 'base64').toString('utf8'));
     if (!parsed) return res.status(400).send('Bad Request');
 
-    // Decrypt 3-field envelope
-    if (!(parsed.encrypted_flow_data && parsed.encrypted_aes_key && parsed.initial_vector)) {
+    // Decrypt 3-field envelope (accept aliases)
+    if (!(parsed.encrypted_flow_data && parsed.encrypted_aes_key && parsed.initial_vector) &&
+        !((parsed.encryptedData || parsed.encrypted_flowData) && (parsed.encryptedAesKey || parsed.encrypted_aes_key) && (parsed.initialization_vector || parsed.iv || parsed.initial_vector))) {
       // If no envelope present, treat as plain health ping
-      return res.status(200).json({ data: { status: 'active' }, version: VERSION });
+      res.status(200).json({ data: { status: 'active' }, version: VERSION });
+      return;
     }
 
     console.log('Detected 3-field envelope: attempting decrypt');
-    const decrypted = _decryptMetaEnvelope3(parsed, PRIVATE_KEY);
-    if (!decrypted) {
-      console.error('Decryption failed: envelope malformed or fields missing');
-      return res.status(400).send('Bad Request: envelope malformed or decryption failed');
+    const result = _decryptMetaEnvelope3(parsed, PRIVATE_KEY);
+    if (!result) {
+      res.status(400).send('Bad Request: envelope malformed or decryption failed');
+      return;
     }
-    const { clear, aesKey } = decrypted;
+    const { clear, aesKey } = result;
     console.log('DECRYPTED CLEAR KEYS:', Object.keys(clear || {}));
 
     // Health check?
