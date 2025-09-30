@@ -45,7 +45,7 @@ export default async function handler(req, res) {
       ({ clear, aesKey } = decryptFlowRequestBody(rawBody, PRIVATE_KEY));
     } catch (e) {
       // If decrypt fails, log and try a plain JSON fallback for health checks
-      console.error('decryptFlowRequestBody failed:', e?.message || e);
+      console.error('decryptFlowRequestBody failed:', e?.message || e, '\nBody:', rawBody, '\nKey:', PRIVATE_KEY);
       try {
         const maybe = JSON.parse(trimmed);
         clear = maybe;
