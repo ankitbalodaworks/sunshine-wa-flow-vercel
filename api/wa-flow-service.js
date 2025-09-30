@@ -1,5 +1,5 @@
 
-import crypto from 'node:crypto';
+import * as crypto from 'node:crypto';
 
 export const config = { runtime: 'nodejs' };
 const VERSION = 'v-inline-3field-OK-04';
