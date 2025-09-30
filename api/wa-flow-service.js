@@ -1,25 +1,22 @@
-import { decryptFlowRequestBody, encryptFlowResponseBody } from '../lib/waCrypto.js';
-import { persistServiceSubmission } from '../lib/persist.js';
 
-export const config = { runtime: 'nodejs' };
 // api/wa-flow-service.js
 import crypto from 'node:crypto';
 
-const VERSION = 'v-inline-3field-OK-01';
+export const config = { runtime: 'nodejs' }; // valid: "nodejs" | "edge"
+const VERSION = 'v-inline-3field-OK-02';
 
-// ---- utils ----
-async function readRawBody(req) {
+// ---------- helpers ----------
+async function _readRawBody(req) {
   if (typeof req.body === 'string') return req.body;
   if (Buffer.isBuffer(req.body)) return req.body.toString('utf8');
   if (req.body && typeof req.body === 'object') return JSON.stringify(req.body);
   const chunks = [];
   for await (const c of req) chunks.push(c);
   return Buffer.concat(chunks).toString('utf8');
-}
-function jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
+function _jsonTry(s) { try { return JSON.parse(s); } catch { return null; } }
 
 // Decrypt Meta Flows 3-field envelope -> { clear:Object, aesKey:Buffer }
-function decryptMetaEnvelope3(obj, privatePem) {
+function _decryptMetaEnvelope3(obj, privatePem) {
   const efd = obj?.encrypted_flow_data;
   const eak = obj?.encrypted_aes_key;
   const ivB64 = obj?.initial_vector;
@@ -41,13 +38,13 @@ function decryptMetaEnvelope3(obj, privatePem) {
   const dec  = crypto.createDecipheriv(algo, aesKey, iv);
   dec.setAuthTag(tag);
   const plain = Buffer.concat([dec.update(ct), dec.final()]);
-  const clear = jsonTry(plain.toString('utf8'));
+  const clear = _jsonTry(plain.toString('utf8'));
   if (!clear) throw new Error('Decrypted but not JSON');
   return { clear, aesKey };
 }
 
 // Encrypt response JSON with same AES key -> base64(JSON{iv,ciphertext,tag})
-function encryptResponseB64(obj, aesKey) {
+function _encryptResponseB64(obj, aesKey) {
   const algo = aesKey.length === 16 ? 'aes-128-gcm' : 'aes-256-gcm';
   const iv   = crypto.randomBytes(12);
   const enc  = crypto.createCipheriv(algo, aesKey, iv);
@@ -61,7 +58,8 @@ function encryptResponseB64(obj, aesKey) {
   return Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
 }
 
-export default async function handler(req, res) {
+// ---------- handler ----------
+module.exports = async function handler(req, res) {
   try {
     if (req.method === 'GET') {
       return res.status(200).json({ ok: true, version: VERSION, now: new Date().toISOString() });
@@ -74,7 +72,7 @@ export default async function handler(req, res) {
       return res.status(500).send('Server not configured');
     }
 
-    const raw = await readRawBody(req);
+    const raw = await _readRawBody(req);
     const ctHdr = (req.headers['content-type'] || '').toString();
     console.log('CT:', ctHdr, '| LEN:', raw?.length || 0, '| PREVIEW:', (raw || '').slice(0, 120).replace(/\s+/g,' '));
 
@@ -84,7 +82,7 @@ export default async function handler(req, res) {
     }
 
     // Parse incoming as JSON (or base64(JSON))
-    const parsed = jsonTry(raw) || jsonTry(Buffer.from(raw, 'base64').toString('utf8'));
+    const parsed = _jsonTry(raw) || _jsonTry(Buffer.from(raw, 'base64').toString('utf8'));
     if (!parsed) {
       console.error('Incoming not JSON nor base64(JSON)');
       return res.status(400).send('Bad Request');
@@ -94,9 +92,8 @@ export default async function handler(req, res) {
     let clear, aesKey;
     if (parsed.encrypted_flow_data && parsed.encrypted_aes_key && parsed.initial_vector) {
       console.log('Detected 3-field envelope: attempting decrypt');
-      ({ clear, aesKey } = decryptMetaEnvelope3(parsed, PRIVATE_KEY));
+      ({ clear, aesKey } = _decryptMetaEnvelope3(parsed, PRIVATE_KEY));
     } else {
-      // Any other shape: treat as plain health ping
       console.warn('No 3-field envelope present -> plain health OK');
       return res.status(200).json({ data: { status: 'active' }, version: VERSION });
     }
@@ -114,7 +111,7 @@ export default async function handler(req, res) {
 
     if (isHealth) {
       const ok = { data: { status: 'active' } };
-      const b64 = encryptResponseB64(ok, aesKey);
+      const b64 = _encryptResponseB64(ok, aesKey);
       res.setHeader('Content-Type', 'application/octet-stream');
       return res.status(200).send(b64);
     }
@@ -136,9 +133,8 @@ export default async function handler(req, res) {
     }
     console.log('FIELDS_KEYS:', Object.keys(fields));
 
-    // Build success response
     const reply = { version: '3.0', screen: 'SERVICE_SUCCESS', data: { ok: true } };
-    const b64 = encryptResponseB64(reply, aesKey);
+    const b64 = _encryptResponseB64(reply, aesKey);
     res.setHeader('Content-Type', 'application/octet-stream');
     return res.status(200).send(b64);
 
@@ -147,13 +143,6 @@ export default async function handler(req, res) {
     return res.status(500).send('Internal Server Error');
   }
 }
-
-// Robust raw-body reader
-async function readRawBody(req) {
-  if (typeof req.body === 'string') return req.body;
-  if (Buffer.isBuffer(req.body))     return req.body.toString('utf8');
-  if (req.body && typeof req.body === 'object') return JSON.stringify(req.body);
-  const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks).toString('utf8');
 }
