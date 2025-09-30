@@ -91,7 +91,12 @@ export default async function handler(req, res) {
     }
 
     console.log('Detected 3-field envelope: attempting decrypt');
-    const { clear, aesKey } = _decryptMetaEnvelope3(parsed, PRIVATE_KEY);
+    const decrypted = _decryptMetaEnvelope3(parsed, PRIVATE_KEY);
+    if (!decrypted) {
+      console.error('Decryption failed: envelope malformed or fields missing');
+      return res.status(400).send('Bad Request: envelope malformed or decryption failed');
+    }
+    const { clear, aesKey } = decrypted;
     console.log('DECRYPTED CLEAR KEYS:', Object.keys(clear || {}));
 
     // Health check?
