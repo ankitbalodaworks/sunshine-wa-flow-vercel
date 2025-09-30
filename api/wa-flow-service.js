@@ -69,6 +69,7 @@ export default async function handler(req, res) {
 
     if (isHealth) {
       const ok = { data: { status: 'active' } };
+      console.log('HEALTH CHECK RESPONSE: aesKey present?', !!aesKey);
       if (aesKey) {
         const b64 = encryptFlowResponseBody(ok, aesKey);
         res.setHeader('Content-Type', 'application/octet-stream');
